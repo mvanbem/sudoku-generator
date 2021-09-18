@@ -9,18 +9,20 @@ use crate::formula_builder::{
 };
 use crate::sudoku::{Box, Cell, Col, Digit, Row, VariableKind};
 
-// macro_rules! given_digit {
-//     ($clauses:ident, row: $row:expr, col: $col:expr, digit: $digit:expr) => {
-//         $clauses.push_unit(Literal::positive(Variable::for_digit_placement(
-//             Row::new($row).unwrap(),
-//             Col::new($col).unwrap(),
-//             Digit::new($digit).unwrap(),
-//         )));
-//     };
-// }
+pub struct Parameters {
+    pub givens: usize,
+    pub inference_levels: usize,
+    pub allowed_inferences: Inferences,
+}
 
-pub async fn emit_problem<W: AsyncWrite + Unpin>(
+pub struct Inferences {
+    pub naked_single: bool,
+    pub hidden_single: bool,
+}
+
+pub async fn build_formula<W: AsyncWrite + Unpin>(
     w: &mut W,
+    params: &Parameters,
 ) -> Result<HashMap<VariableKind, Variable>> {
     let mut formula = TaggedVariableFormulaBuilder::default();
 
@@ -39,7 +41,7 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
         }
     }
 
-    // No duplicates in a row.
+    // Each digit appears once in a row.
     for row in Row::values() {
         for digit in Digit::values() {
             let literals: Vec<_> = Col::values()
@@ -50,10 +52,11 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
                 })
                 .collect();
             formula.add_at_most_one_of_constraint(&literals);
+            formula.add_clause(literals);
         }
     }
 
-    // No duplicates in a column.
+    // Each digit appears once in a column.
     for col in Col::values() {
         for digit in Digit::values() {
             let literals: Vec<_> = Row::values()
@@ -64,10 +67,11 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
                 })
                 .collect();
             formula.add_at_most_one_of_constraint(&literals);
+            formula.add_clause(literals);
         }
     }
 
-    // No duplicates in a box.
+    // Each digit appears once in a box.
     for box_ in Box::values() {
         for digit in Digit::values() {
             let literals: Vec<_> = box_
@@ -83,6 +87,7 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
                 })
                 .collect();
             formula.add_at_most_one_of_constraint(&literals);
+            formula.add_clause(literals);
         }
     }
 
@@ -102,19 +107,14 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
     let given_count = BitVector::add_tree(&mut formula, given_bits);
 
     // Fix the number of given digits.
-    let given_goal = 36;
     assert_eq!(7, given_count.len());
     for bit in 0..7 {
         let mut literal = given_count.bits()[bit];
-        if (given_goal >> bit) & 1 == 0 {
+        if (params.givens >> bit) & 1 == 0 {
             literal = -literal;
         }
         formula.add_unit_clause(literal);
     }
-
-    const LEVELS: usize = 10;
-    const INFER_NAKED_SINGLES: bool = true;
-    const INFER_HIDDEN_SINGLES: bool = false;
 
     // At level 0, the given placements are forced and nothing is eliminated.
     for cell in Cell::values() {
@@ -157,7 +157,7 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
     // Model bounded iteration of forced and eliminated placements in accordance with a rule set.
     for cell in Cell::values() {
         for digit in Digit::values() {
-            for level in 1..LEVELS {
+            for level in 1..params.inference_levels {
                 let prev_level = level - 1;
 
                 // Build up lists of justifications for forcing or eliminating this placement. The
@@ -192,7 +192,7 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
                 //
                 // This placement is forced if all other placements in its cell are eliminated on
                 // the previous level.
-                if INFER_NAKED_SINGLES {
+                if params.allowed_inferences.naked_single {
                     forcing_justifications.push({
                         let mut literals = Vec::new();
                         for other_digit in Digit::values() {
@@ -219,7 +219,7 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
                 //
                 // This placement is forced if, within one of its houses, all other placements for
                 // this digit are eliminated.
-                if INFER_HIDDEN_SINGLES {
+                if params.allowed_inferences.hidden_single {
                     forcing_justifications.push({
                         let mut literals = Vec::new();
                         for other_col in Col::values() {
@@ -349,7 +349,7 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
                     row: cell.row,
                     col: cell.col,
                     digit,
-                    level: LEVELS - 1,
+                    level: params.inference_levels - 1,
                 })
                 .as_positive();
             let eliminated = formula
@@ -357,7 +357,7 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
                     row: cell.row,
                     col: cell.col,
                     digit,
-                    level: LEVELS - 1,
+                    level: params.inference_levels - 1,
                 })
                 .as_positive();
             let placed = formula
@@ -371,33 +371,6 @@ pub async fn emit_problem<W: AsyncWrite + Unpin>(
             formula.add_logical_equivalence_constraint(eliminated, -placed);
         }
     }
-
-    // given_digit!(formula, row: 1, col: 3, digit: 9);
-    // given_digit!(formula, row: 1, col: 8, digit: 4);
-    // given_digit!(formula, row: 2, col: 3, digit: 8);
-    // given_digit!(formula, row: 2, col: 4, digit: 7);
-    // given_digit!(formula, row: 2, col: 5, digit: 5);
-    // given_digit!(formula, row: 3, col: 1, digit: 5);
-    // given_digit!(formula, row: 3, col: 6, digit: 9);
-    // given_digit!(formula, row: 3, col: 8, digit: 1);
-    // given_digit!(formula, row: 4, col: 2, digit: 7);
-    // given_digit!(formula, row: 4, col: 4, digit: 6);
-    // given_digit!(formula, row: 4, col: 8, digit: 9);
-    // given_digit!(formula, row: 5, col: 1, digit: 6);
-    // given_digit!(formula, row: 5, col: 4, digit: 2);
-    // given_digit!(formula, row: 5, col: 6, digit: 1);
-    // given_digit!(formula, row: 5, col: 9, digit: 3);
-    // given_digit!(formula, row: 6, col: 2, digit: 4);
-    // given_digit!(formula, row: 6, col: 6, digit: 8);
-    // given_digit!(formula, row: 6, col: 8, digit: 7);
-    // given_digit!(formula, row: 7, col: 2, digit: 6);
-    // given_digit!(formula, row: 7, col: 4, digit: 4);
-    // given_digit!(formula, row: 7, col: 9, digit: 8);
-    // given_digit!(formula, row: 8, col: 5, digit: 1);
-    // given_digit!(formula, row: 8, col: 6, digit: 7);
-    // given_digit!(formula, row: 8, col: 7, digit: 6);
-    // given_digit!(formula, row: 9, col: 2, digit: 5);
-    // given_digit!(formula, row: 9, col: 7, digit: 9);
 
     formula.write_dimacs(w).await?;
 
